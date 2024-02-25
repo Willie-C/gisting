@@ -1,39 +1,31 @@
 # coding=utf-8
-# Copyright 2020 The HuggingFace Inc. team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+
+# 版权声明和许可信息
+
 """
-Gist training script, adapted from huggingface's run_clm.py example.
+Gist 训练脚本，修改自 Hugging Face 的 run_clm.py 示例。
 """
 
+# 导入必要的库
 import logging
 import os
 
-import hydra
-import torch  # noqa
-from datasets import DatasetDict, load_dataset
-from omegaconf.dictconfig import DictConfig
+import hydra  # 配置库
+import torch  # PyTorch
+from datasets import DatasetDict, load_dataset  # 数据集处理
+from omegaconf.dictconfig import DictConfig  # 配置管理
 from transformers import (
     AutoConfig,
     AutoTokenizer,
     LlamaTokenizer,
     is_torch_tpu_available,
     set_seed,
-)
-from transformers.trainer_utils import get_last_checkpoint
-from transformers.utils import check_min_version
-from transformers.utils.versions import require_version
+)  # Hugging Face Transformers 库
+from transformers.trainer_utils import get_last_checkpoint  # 训练工具
+from transformers.utils import check_min_version  # 工具
+from transformers.utils.versions import require_version  # 工具
 
+# 自定义模块
 from . import gist_llama, gist_t5
 from .arguments import Arguments, global_setup
 from .data import alpaca
@@ -44,84 +36,94 @@ from .integrations import CustomWandbCallback, EvaluateFirstStepCallback
 from .metrics import get_compute_metrics_fn
 from .trainer_seq2seq import GistSeq2SeqTrainer
 
-# Will error if the minimal version of Transformers is not installed. Remove at
-# your own risks.
+# 检查 Transformers 库的最低版本要求
 check_min_version("4.28.0.dev0")
 
+# 检查 Datasets 库的最低版本要求
 require_version(
     "datasets>=1.8.0",
     "To fix: pip install -r examples/pytorch/language-modeling/requirements.txt",
 )
 
+# 初始化日志记录器
 logger = logging.getLogger(__name__)
 
-
+# 主函数与 Hydra 配置
 @hydra.main(config_path="conf", config_name="config")
 def main(args: DictConfig) -> None:
+    # 设置全局配置
     args: Arguments = global_setup(args)
 
-    # Detecting last checkpoint.
+    # 检测最后一个检查点
     last_checkpoint = None
     if (
         os.path.isdir(args.training.output_dir)
         and args.training.do_train
         and not args.training.overwrite_output_dir
     ):
+        # 获取最后一个检查点
         last_checkpoint = get_last_checkpoint(args.training.output_dir)
+        # 如果没有最后一个检查点但输出目录不为空，发出警告
         if last_checkpoint is None and len(os.listdir(args.training.output_dir)) > 0:
             existing_files = os.listdir(args.training.output_dir)
             logger.warning(
                 (
-                    "Output directory (%s) already exists and "
-                    "is not empty. Existing files: %s. "
-                    "Training anyways as these may just be output files."
+                    "输出目录 (%s) 已经存在且"
+                    "不为空。现有文件: %s。"
+                    "尽管如此仍进行训练，因为这些文件可能只是输出文件。"
                 ),
                 args.training.output_dir,
                 str(existing_files),
             )
+        # 如果有最后一个检查点且未指定从检查点恢复，则输出信息提示恢复训练
         elif (
             last_checkpoint is not None and args.training.resume_from_checkpoint is None
         ):
             logger.info(
-                f"Checkpoint detected, resuming training at {last_checkpoint}. To "
-                "avoid this behavior, change "
-                "the `--output_dir` or add `--overwrite_output_dir` to train from "
-                "scratch."
+                f"检测到检查点，从 {last_checkpoint} 恢复训练。"
+                "要避免此行为，请更改"
+                "`--output_dir` 或添加 `--overwrite_output_dir` 以从头开始训练。"
             )
 
-    # Set seed before initializing model.
+    # 在初始化模型之前设置种子
     set_seed(args.training.seed)
 
+    # 加载数据集
     if args.data.dataset_name == "alpaca-plus":
+        # 如果数据集名称为 "alpaca-plus"，则加载数据集
         lm_datasets = load_dataset(
             "src/data/alpaca/alpaca.py",
             cache_dir=args.model.cache_dir,
         )
     else:
-        raise NotImplementedError(f"Unknown dataset name {args.data.dataset_name}")
+        raise NotImplementedError(f"未知的数据集名称 {args.data.dataset_name}")
 
+    # 模型配置
     config_kwargs = {
         "cache_dir": args.model.cache_dir,
         "revision": args.model.model_revision,
         "use_auth_token": True if args.model.use_auth_token else None,
     }
     if args.model.llama_debug:
+        # 如果启用了 llama_debug，则使用调试配置
         if args.model.pretrained:
-            raise RuntimeError("llama_debug requires pretrained set to False")
+            raise RuntimeError("llama_debug 需要将 pretrained 设置为 False")
         config = DEBUG_LLAMA_CONFIG
     elif args.model.config_name:
+        # 如果指定了 config_name，则从预训练模型名称加载配置
         config = AutoConfig.from_pretrained(args.model.config_name, **config_kwargs)
     elif args.model.model_name_or_path:
+        # 否则，从预训练模型路径加载配置
         config = AutoConfig.from_pretrained(
             args.model.model_name_or_path, **config_kwargs
         )
     else:
         raise ValueError(
-            "Unlike run_clm.py, this script does not support specifying a model type "
-            "from scratch. Specify args.model.model_name_or_path and set "
-            "args.pretrained = False to train from scratch instead."
+            "与 run_clm.py 不同，此脚本不支持从头指定模型类型。请指定 args.model.model_name_or_path，并将"
+            "args.pretrained = False 以从头开始训练。"
         )
 
+    # 分词器配置
     is_t5 = any(t in args.model.model_name_or_path.lower() for t in ("t5", "tk"))
     is_llama = any(t in args.model.model_name_or_path.lower() for t in ("llama",))
 
@@ -132,35 +134,42 @@ def main(args: DictConfig) -> None:
         "use_auth_token": True if args.model.use_auth_token else None,
     }
     if args.model.tokenizer_name:
+        # 如果指定了 tokenizer_name，则从预训练分词器名称加载分词器
         tokenizer = AutoTokenizer.from_pretrained(
             args.model.tokenizer_name, **tokenizer_kwargs
         )
     elif args.model.model_name_or_path:
+        # 否则，从预训练模型路径加载分词器
         if is_llama:
+            # 如果是 Llama 模型，则使用 LlamaTokenizer
             tokenizer = LlamaTokenizer.from_pretrained(
                 args.model.model_name_or_path, **tokenizer_kwargs
             )
+            # 设置 LlamaTokenizer 的 pad_token 和 padding_side
             tokenizer.pad_token = tokenizer.eos_token
             tokenizer.padding_side = "left"
         else:
+            # 否则，使用 AutoTokenizer
             tokenizer = AutoTokenizer.from_pretrained(
                 args.model.model_name_or_path, **tokenizer_kwargs
             )
     else:
         raise ValueError(
-            "You are instantiating a new tokenizer from scratch. This is not supported "
-            "by this script."
-            "You can do it from another script, save it, and load it from here, using "
-            "--tokenizer_name."
+            "您正在从头实例化一个新的分词器。此脚本不支持此操作。"
+            "您可以在另一个脚本中执行此操作，并将其保存，然后使用 --tokenizer_name 从此处加载。"
         )
 
+    # 模型实例化
     if is_t5:
+        # 如果是 T5 模型，则使用 GistT5ForConditionalGeneration
         model_cls = GistT5ForConditionalGeneration
     elif is_llama:
+        # 如果是 Llama 模型，则使用 GistLlamaForCausalLM
         model_cls = GistLlamaForCausalLM
     else:
-        raise ValueError(f"Model type {args.model.model_name_or_path} not supported")
+        raise ValueError(f"不支持模型类型 {args.model.model_name_or_path}")
     if args.model.pretrained:
+        # 如果是预训练模型，则从预训练模型加载模型
         model = model_cls.from_pretrained(
             args.model.model_name_or_path,
             from_tf=bool(".ckpt" in args.model.model_name_or_path),
@@ -170,25 +179,25 @@ def main(args: DictConfig) -> None:
             use_auth_token=True if args.model.use_auth_token else None,
         )
     else:
+        # 否则，实例化一个新的模型
         model = model_cls(config)
 
-    # ==== BEGIN GIST CHANGES ====
-    # Check if gist token has already been added to the model (e.g. because
-    # we're resuming from a checkpoint.)
+    # Gist 令牌处理
     if is_t5 and len(tokenizer) == gist_t5.PRETRAINED_VOCAB_SIZE + 1:
+        # 如果是 T5 模型且分词器的词汇表大小与预定义的大小相符，则验证权重矩阵的形状
         assert model.shared.weight.shape[0] == gist_t5.PRETRAINED_VOCAB_SIZE + 1
     elif is_llama and len(tokenizer) == gist_llama.PRETRAINED_VOCAB_SIZE + 1:
+        # 如果是 Llama 模型且分词器的词汇表大小与预定义的大小相符，则验证权重矩阵的形状
         assert (
             model.model.embed_tokens.weight.shape[0]
             == gist_llama.PRETRAINED_VOCAB_SIZE + 1
         )
         assert model.lm_head.weight.shape[0] == gist_llama.PRETRAINED_VOCAB_SIZE + 1
     else:
-        # Initialize gist token
+        # 否则，初始化 Gist 令牌
         tokenizer.add_special_tokens({"additional_special_tokens": ["<GIST>"]})
         model.resize_token_embeddings(len(tokenizer))
-        # Set new word embedding to average of existing word embeddings. For why,
-        # see https://nlp.stanford.edu/~johnhew/vocab-expansion.html
+        # 将新单词嵌入设置为现有单词嵌入的平均值
         if args.model.pretrained:
             with torch.no_grad():
                 if is_t5:
@@ -200,53 +209,58 @@ def main(args: DictConfig) -> None:
                     model.lm_head.weight[-1] = model.lm_head.weight[:-1].mean(0)
                 else:
                     raise ValueError(
-                        f"Model type {args.model.model_name_or_path} not supported"
+                        f"不支持模型类型 {args.model.model_name_or_path}"
                     )
     gist_token = tokenizer.additional_special_tokens_ids[-1]
 
     if args.training.do_train:
+        # 如果进行训练，加载训练数据集
         if "train" not in lm_datasets:
-            raise ValueError("--do_train requires a train dataset")
+            raise ValueError("--do_train 需要一个训练数据集")
         train_dataset = lm_datasets["train"]
         if args.data.max_train_samples is not None:
+            # 如果指定了最大训练样本数，则截取数据集
             max_train_samples = min(len(train_dataset), args.data.max_train_samples)
             train_dataset = train_dataset.select(range(max_train_samples))
 
     if args.training.do_eval:
+        # 如果进行评估，加载验证数据集
         validation_splits = [
             split for split in lm_datasets if split.startswith("validation")
         ]
         if not validation_splits:
             raise ValueError(
-                "--do_eval requires at least one validation dataset "
-                "that starts with `validation`"
+                "--do_eval 需要至少一个以 `validation` 开头的验证数据集"
             )
         eval_dataset = DatasetDict(
-            # Trim "validation-" prefix.
+            # 修剪 "validation-" 前缀
             {split[11:]: lm_datasets[split] for split in validation_splits}
         )
-        # (Deterministically) shuffle eval in case we are truncating.
+        # 在截取样本之前，（确定性地）对验证集进行洗牌
         eval_dataset = eval_dataset.shuffle(seed=42)
         if args.data.max_eval_samples is not None:
+            # 如果指定了最大评估样本数，则截取数据集
             eval_dataset = nested_select(
                 eval_dataset,
                 args.data.max_eval_samples,
             )
 
+        # 获取计算指标函数
         compute_metrics = get_compute_metrics_fn(
             gist_token=gist_token, tokenizer=tokenizer, args=args
         )
 
     if is_t5:
+        # 如果是 T5 模型，则使用 alpaca.collator.DataCollatorForAlpaca
         data_collator = alpaca.collator.DataCollatorForAlpaca(
             tokenizer,
             model=model,
             padding="longest",
-            # Chosen so that <1% of examples are truncated.
-            # See data/alpaca_plus/length_stats.txt for length stats.
+            # 选择确保 <1% 的示例被截断
+            # 有关长度统计信息，请参见 data/alpaca_plus/length_stats.txt
             max_source_length=128,
             max_target_length=256,
-            # Human eval examples are longer.
+            # 人类评估示例较长
             max_source_length_human=384,
             max_target_length_human=384,
             label_pad_token_id=-100,
@@ -258,14 +272,13 @@ def main(args: DictConfig) -> None:
             add_gist_token=args.training.gist.add_gist_token,
         )
     elif is_llama:
-        # This data collator variant does causal language modeling with left
-        # padding.
+        # 如果是 Llama 模型，则使用 alpaca.collator.DataCollatorForAlpacaCLM
         data_collator = alpaca.collator.DataCollatorForAlpacaCLM(
             tokenizer,
-            # Chosen so that <1% of examples are truncated.
-            # See data/alpaca_plus/length_stats.txt for length stats.
+            # 选择确保 <1% 的示例被截断
+            # 有关长度统计信息，请参见 data/alpaca_plus/length_stats.txt
             max_length=256 + 256,  # source=256; target=256
-            # Human eval examples are longer.
+            # 人类评估示例较长
             max_length_human=384 + 384,  # source=384; target=384
             gist_condition=args.training.gist.condition,
             num_gist_tokens=args.training.gist.num_gist_tokens,
@@ -274,87 +287,13 @@ def main(args: DictConfig) -> None:
             check_correctness=True,
         )
     else:
-        assert False, "should be is_llama or is_t5"
+        assert False, "应该是 is_llama 或 is_t5"
 
-    # Initialize our Trainer
+    # 初始化训练器
     custom_callbacks = []
     if args.wandb.log:
         custom_callbacks.append(CustomWandbCallback(args))
     if args.training.evaluate_before_train:
         custom_callbacks.append(EvaluateFirstStepCallback())
 
-    trainer = GistSeq2SeqTrainer(
-        model=model,
-        args=args.training,
-        train_dataset=train_dataset if args.training.do_train else None,
-        eval_dataset=dict(eval_dataset) if args.training.do_eval else None,
-        tokenizer=tokenizer,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics
-        if args.training.do_eval and not is_torch_tpu_available()
-        else None,
-        preprocess_logits_for_metrics=None,
-        callbacks=custom_callbacks,
-    )
-
-    # Training
-    if args.training.do_train:
-        checkpoint = None
-        if args.training.resume_from_checkpoint is not None:
-            checkpoint = args.training.resume_from_checkpoint
-        elif last_checkpoint is not None:
-            checkpoint = last_checkpoint
-        train_result = trainer.train(resume_from_checkpoint=checkpoint)
-        trainer.save_model()  # Saves the tokenizer too for easy upload
-
-        metrics = train_result.metrics
-
-        max_train_samples = (
-            args.data.max_train_samples
-            if args.data.max_train_samples is not None
-            else len(train_dataset)
-        )
-        metrics["train_samples"] = min(max_train_samples, len(train_dataset))
-
-        trainer.log_metrics("train", metrics)
-        trainer.save_metrics("train", metrics)
-        trainer.save_state()
-
-    if args.training.do_benchmarking:
-        if not args.training.do_eval:
-            raise RuntimeError("do_benchmarking requires do_eval")
-        trainer.benchmark(
-            gist_token,
-            eval_dataset["human"],
-            output_file=args.training.benchmarking_output_file,
-        )
-        logger.info("Only doing benchmarking. Exiting!")
-        return
-
-    # Do evaluation for each dataset.
-    if args.training.do_eval:
-        all_eval_metrics = {}
-        for eval_name, to_eval in eval_dataset.items():
-            logger.info(f"*** Evaluate {eval_name} ***")
-
-            metrics = trainer.evaluate(to_eval)
-
-            max_eval_samples = (
-                args.data.max_eval_samples
-                if args.data.max_eval_samples is not None
-                else len(to_eval)
-            )
-            metrics["eval_samples"] = min(max_eval_samples, len(to_eval))
-
-            metrics = {
-                (f"{eval_name}_{k}" if k != "epoch" else k): v
-                for k, v in metrics.items()
-            }
-            all_eval_metrics.update(metrics)
-
-        trainer.log_metrics("eval", all_eval_metrics)
-        trainer.save_metrics("eval", all_eval_metrics)
-
-
-if __name__ == "__main__":
-    main()
+    trainer = GistSeq2SeqTrainer
