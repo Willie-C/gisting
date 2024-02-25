@@ -296,4 +296,78 @@ def main(args: DictConfig) -> None:
     if args.training.evaluate_before_train:
         custom_callbacks.append(EvaluateFirstStepCallback())
 
-    trainer = GistSeq2SeqTrainer
+    trainer = GistSeq2SeqTrainer(
+        model=model,
+        args=args.training,
+        train_dataset=train_dataset if args.training.do_train else None,
+        eval_dataset=dict(eval_dataset) if args.training.do_eval else None,
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        compute_metrics=compute_metrics
+        if args.training.do_eval and not is_torch_tpu_available()
+        else None,
+        preprocess_logits_for_metrics=None,
+        callbacks=custom_callbacks,
+    )
+
+    # 训练
+    if args.training.do_train:
+        checkpoint = None
+        if args.training.resume_from_checkpoint is not None:
+            checkpoint = args.training.resume_from_checkpoint
+        elif last_checkpoint is not None:
+            checkpoint = last_checkpoint
+        train_result = trainer.train(resume_from_checkpoint=checkpoint)
+        trainer.save_model()  # 保存模型和分词器以便轻松上传
+
+        metrics = train_result.metrics
+
+        max_train_samples = (
+            args.data.max_train_samples
+            if args.data.max_train_samples is not None
+            else len(train_dataset)
+        )
+        metrics["train_samples"] = min(max_train_samples, len(train_dataset))
+
+        trainer.log_metrics("train", metrics)
+        trainer.save_metrics("train", metrics)
+        trainer.save_state()
+
+    if args.training.do_benchmarking:
+        if not args.training.do_eval:
+            raise RuntimeError("do_benchmarking 需要 do_eval")
+        trainer.benchmark(
+            gist_token,
+            eval_dataset["human"],
+            output_file=args.training.benchmarking_output_file,
+        )
+        logger.info("只进行基准测试。退出！")
+        return
+
+    # 对每个数据集进行评估
+    if args.training.do_eval:
+        all_eval_metrics = {}
+        for eval_name, to_eval in eval_dataset.items():
+            logger.info(f"*** 评估 {eval_name} ***")
+
+            metrics = trainer.evaluate(to_eval)
+
+            max_eval_samples = (
+                args.data.max_eval_samples
+                if args.data.max_eval_samples is not None
+                else len(to_eval)
+            )
+            metrics["eval_samples"] = min(max_eval_samples, len(to_eval))
+
+            metrics = {
+                (f"{eval_name}_{k}" if k != "epoch" else k): v
+                for k, v in metrics.items()
+            }
+            all_eval_metrics.update(metrics)
+
+        trainer.log_metrics("eval", all_eval_metrics)
+        trainer.save_metrics("eval", all_eval_metrics)
+
+
+if __name__ == "__main__":
+    main()
