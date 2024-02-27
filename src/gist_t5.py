@@ -52,79 +52,85 @@ class GistT5Attention(T5Attention):
         output_attentions=False,
     ):
         """
-        Self-attention (if key_value_states is None) or attention over source
-        sentence (provided by key_value_states).
+        T5模型中注意力机制的前向传播。
 
-        Changes in the gist version:
-            1. Support returning present_key_value_state even if the attention
-               block is not a decoder.
+        Args:
+            hidden_states (torch.Tensor): 输入张量，形状为 (batch_size, seq_length, dim)。
+            mask (torch.Tensor, optional): 注意力掩码张量，形状为 (batch_size, key_length) 或 (batch_size, key_length, key_length)。
+            key_value_states (torch.Tensor, optional): 如果提供，包含键和值状态的张量，用于对源句子进行注意力。
+            position_bias (torch.Tensor, optional): 包含位置偏置信息的张量。
+            past_key_value (tuple of torch.Tensor, optional): 上一注意力步骤的过去键和值张量。
+            layer_head_mask (torch.Tensor, optional): 层头掩码张量。
+            query_length (int, optional): 查询长度，如果提供。
+            use_cache (bool, optional): 是否使用缓存。
+            output_attentions (bool, optional): 是否输出注意力。
+
+        Returns:
+            outputs (tuple): 包含各种输出的元组，包括注意力输出、当前键值状态和位置偏置。
+
+        Gist版本中的变化:
+            1. 即使注意力块不是解码器，也支持返回present_key_value_state。
         """
-        # Input is (batch_size, seq_length, dim)
-        # Mask is (batch_size, key_length) (non-causal) or (batch_size,
-        # key_length, key_length)
-        # past_key_value[0] is (batch_size, n_heads, q_len - 1, dim_per_head)
+        # 获取批次大小和序列长度
         batch_size, seq_length = hidden_states.shape[:2]
-
+        
+        # 如果提供了过去键值，更新实际序列长度
         real_seq_length = seq_length
-
         if past_key_value is not None:
             assert len(past_key_value) == 2, (
-                "past_key_value should have 2 past states: keys and values. "
-                "Got { len(past_key_value)} past states"
+                "past_key_value 应该有2个过去状态: 键和值。"
+                f"得到{len(past_key_value)}个过去状态"
             )
             real_seq_length += (
                 past_key_value[0].shape[2] if query_length is None else query_length
             )
 
+        # 获取键长度
         key_length = (
             real_seq_length if key_value_states is None else key_value_states.shape[1]
         )
 
         def shape(states):
-            """projection"""
+            """将隐藏状态投影到 (batch_size, n_heads, seq_length, dim_per_head) 形状"""
             return states.view(
                 batch_size, -1, self.n_heads, self.key_value_proj_dim
             ).transpose(1, 2)
 
         def unshape(states):
-            """reshape"""
+            """将形状重新调整为 (batch_size, seq_length, dim)"""
             return (
-                states.transpose(1, 2).contiguous().view(batch_size, -1, self.inner_dim)
+                states.view(batch_size, self.n_heads, -1, self.key_value_proj_dim)
+                .transpose(1, 2)
+                .contiguous()
             )
 
         def project(hidden_states, proj_layer, key_value_states, past_key_value):
-            """projects hidden states correctly to key/query states"""
+            """将隐藏状态正确投影到键/值状态"""
             if key_value_states is None:
-                # self-attn
-                # (batch_size, n_heads, seq_length, dim_per_head)
+                # 自注意力
                 hidden_states = shape(proj_layer(hidden_states))
             elif past_key_value is None:
-                # cross-attn
-                # (batch_size, n_heads, seq_length, dim_per_head)
+                # 交叉注意力
                 hidden_states = shape(proj_layer(key_value_states))
 
             if past_key_value is not None:
                 if key_value_states is None:
-                    # self-attn
-                    # (batch_size, n_heads, key_length, dim_per_head)
+                    # 自注意力
                     hidden_states = torch.cat([past_key_value, hidden_states], dim=2)
                 elif past_key_value.shape[2] != key_value_states.shape[1]:
-                    # checking that the `sequence_length` of the
-                    # `past_key_value` is the same as the provided
-                    # `key_value_states` to support prefix tuning cross-attn
-                    # (batch_size, n_heads, seq_length, dim_per_head)
+                    # 检查`past_key_value`的`sequence_length`与提供的`key_value_states`的一致性，以支持前缀调整交叉注意力
                     hidden_states = shape(proj_layer(key_value_states))
                 else:
-                    # cross-attn
+                    # 交叉注意力
                     hidden_states = past_key_value
             return hidden_states
 
-        # get query states
+        # 获取查询状态
         query_states = shape(
             self.q(hidden_states)
-        )  # (batch_size, n_heads, seq_length, dim_per_head)
+        )  # 形状为 (batch_size, n_heads, seq_length, dim_per_head)
 
-        # get key/value states
+        # 获取键/值状态
         key_states = project(
             hidden_states,
             self.k,
@@ -138,11 +144,10 @@ class GistT5Attention(T5Attention):
             past_key_value[1] if past_key_value is not None else None,
         )
 
-        # compute scores
-        # equivalent of torch.einsum("bnqd,bnkd->bnqk", query_states,
-        # key_states), compatible with onnx op>9
+        # 计算注意力分数
         scores = torch.matmul(query_states, key_states.transpose(3, 2))
 
+        # 如果未提供位置偏置，则计算一个
         if position_bias is None:
             if not self.has_relative_attention_bias:
                 position_bias = torch.zeros(
@@ -157,16 +162,17 @@ class GistT5Attention(T5Attention):
                     real_seq_length, key_length, device=scores.device
                 )
 
-            # if key and values are already calculated
-            # we want only the last query position bias
+            # 如果已经计算了键和值，则仅需最后一个查询位置的偏置
             if past_key_value is not None:
                 position_bias = position_bias[:, :, -hidden_states.size(1) :, :]
 
+            # 如果提供了掩码，则将其加入到位置偏置中
             if mask is not None:
                 position_bias = (
                     position_bias + mask
-                )  # (batch_size, n_heads, seq_length, key_length)
+                )  # 形状为 (batch_size, n_heads, seq_length, key_length)
 
+        # 如果存在头部修剪，则将其应用到位置偏置中
         if self.pruned_heads:
             mask = torch.ones(position_bias.shape[1])
             mask[list(self.pruned_heads)] = 0
@@ -175,35 +181,38 @@ class GistT5Attention(T5Attention):
             position_bias_masked = position_bias
 
         scores += position_bias_masked
+        # 计算注意力权重
         attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(
             scores
-        )  # (batch_size, n_heads, seq_length, key_length)
+        )  # 形状为 (batch_size, n_heads, seq_length, key_length)
         attn_weights = nn.functional.dropout(
             attn_weights, p=self.dropout, training=self.training
-        )  # (batch_size, n_heads, seq_length, key_length)
+        )  # 形状为 (batch_size, n_heads, seq_length, key_length)
 
-        # Mask heads if we want to
+        # 如果需要，对头部进行掩码
         if layer_head_mask is not None:
             attn_weights = attn_weights * layer_head_mask
 
+        # 计算注意力输出
         attn_output = unshape(
             torch.matmul(attn_weights, value_states)
-        )  # (batch_size, seq_length, dim)
+        )  # 形状为 (batch_size, seq_length, dim)
         attn_output = self.o(attn_output)
 
         present_key_value_state = None
+        # 如果需要使用缓存
         if use_cache:
             if self.is_decoder:
                 present_key_value_state = (key_states, value_states)
             else:
-                # Still set present_key_value_state, but this should never be
-                # true outside of benchmarking.
+                # 在非解码器中设置 present_key_value_state，但这只应在基准测试期间发生
                 warnings.warn(
-                    "Setting present_key_value_state outside of a decoder. "
-                    "Make sure this only happens during benchmarking"
+                    "在非解码器中设置 present_key_value_state。"
+                    "确保这仅在基准测试期间发生"
                 )
                 present_key_value_state = (key_states, value_states)
 
+        # 构造输出元组
         outputs = (attn_output,) + (present_key_value_state,) + (position_bias,)
 
         if output_attentions:
@@ -212,7 +221,7 @@ class GistT5Attention(T5Attention):
 
     def compute_bias(self, query_length, key_length, device=None):
         """
-        Compute binned relative position bias
+        计算分箱的相对位置偏置
         """
         if device is None:
             device = self.relative_attention_bias.weight.device
@@ -224,19 +233,19 @@ class GistT5Attention(T5Attention):
         ]
         relative_position = (
             memory_position - context_position
-        )  # shape (query_length, key_length)
+        )  # 形状为 (query_length, key_length)
         relative_position_bucket = self._relative_position_bucket(
-            relative_position,  # shape (query_length, key_length)
+            relative_position,  # 形状为 (query_length, key_length)
             bidirectional=(not self.is_decoder),
             num_buckets=self.relative_attention_num_buckets,
             max_distance=self.relative_attention_max_distance,
         )
         values = self.relative_attention_bias(
             relative_position_bucket
-        )  # shape (query_length, key_length, num_heads)
+        )  # 形状为 (query_length, key_length, num_heads)
         values = values.permute([2, 0, 1]).unsqueeze(
             0
-        )  # shape (1, num_heads, query_length, key_length)
+        )  # 形状为 (1, num_heads, query_length, key_length)
         return values
 
 
@@ -259,7 +268,25 @@ class GistT5LayerSelfAttention(T5LayerSelfAttention):
         use_cache=False,
         output_attentions=False,
     ):
+        """
+        前向传播函数，实现了T5层的自注意力机制。
+
+        Args:
+            hidden_states (torch.Tensor): 输入张量，形状为 (batch_size, seq_length, dim)。
+            attention_mask (torch.Tensor, optional): 注意力掩码张量，形状为 (batch_size, seq_length)。
+            position_bias (torch.Tensor, optional): 位置偏置张量。
+            layer_head_mask (torch.Tensor, optional): 层头掩码张量。
+            past_key_value (tuple of torch.Tensor, optional): 上一注意力步骤的过去键和值张量。
+            use_cache (bool, optional): 是否使用缓存。
+            output_attentions (bool, optional): 是否输出注意力。
+
+        Returns:
+            outputs (tuple): 包含各种输出的元组，包括注意力输出、当前键值状态和位置偏置。
+
+        """
+        # 对隐藏状态进行层归一化
         normed_hidden_states = self.layer_norm(hidden_states)
+        # 使用自注意力机制
         attention_output = self.SelfAttention(
             normed_hidden_states,
             mask=attention_mask,
@@ -269,11 +296,13 @@ class GistT5LayerSelfAttention(T5LayerSelfAttention):
             use_cache=use_cache,
             output_attentions=output_attentions,
         )
+        # 添加注意力输出和原始隐藏状态，并使用dropout
         hidden_states = hidden_states + self.dropout(attention_output[0])
         outputs = (hidden_states,) + attention_output[
             1:
-        ]  # add attentions if we output them
+        ]  # 添加注意力权重等信息，如果有的话
         return outputs
+
 
 
 class GistT5Block(T5Block):
