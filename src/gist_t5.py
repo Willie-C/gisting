@@ -751,30 +751,40 @@ class GistT5Stack(T5Stack):
 
 class GistT5ForConditionalGeneration(T5ForConditionalGeneration, GistGenerationMixin):
     def __init__(self, config: T5Config):
-        """Same as existing init, but uses GistT5Stack"""
-        super(T5PreTrainedModel, self).__init__(config)
-        self.model_dim = config.d_model
+        """初始化方法，创建一个新的GistT5ForConditionalGeneration实例。
 
+        Args:
+            config (T5Config): T5模型的配置对象。
+
+        """
+        super(T5PreTrainedModel, self).__init__(config)  # 调用父类的初始化方法
+        self.model_dim = config.d_model  # 设置模型维度
+
+        # 创建共享的嵌入层，用于将输入转换为嵌入表示
         self.shared = nn.Embedding(config.vocab_size, config.d_model)
 
+        # 复制编码器和解码器的配置，并根据需要修改一些参数
         encoder_config = copy.deepcopy(config)
         encoder_config.is_decoder = False
         encoder_config.use_cache = False
         encoder_config.is_encoder_decoder = False
+        # 创建编码器实例
         self.encoder = GistT5Stack(encoder_config, self.shared)
 
         decoder_config = copy.deepcopy(config)
         decoder_config.is_decoder = True
         decoder_config.is_encoder_decoder = False
         decoder_config.num_layers = config.num_decoder_layers
+        # 创建解码器实例
         self.decoder = GistT5Stack(decoder_config, self.shared)
 
+        # 创建线性层，用于将模型的输出转换为词汇表中每个词的概率分布
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
-        # Initialize weights and apply final processing
+        # 初始化权重并进行最终处理
         self.post_init()
 
-        # Model parallel
+        # 初始化模型并设定设备映射
         self.model_parallel = False
         self.device_map = None
 
@@ -786,21 +796,27 @@ class GistT5ForConditionalGeneration(T5ForConditionalGeneration, GistGenerationM
         gist_token: int,
         num_gist_tokens: int,
     ) -> GistActivations:
-        """
-        Computes gist activations for the encoder part of T5.
+        """计算编码器部分的gist激活。
+
+        Args:
+            input_ids (torch.LongTensor): 输入ID张量。
+            attention_mask (torch.FloatTensor): 注意力掩码张量。
+            gist_token (int): gist标记的ID。
+            num_gist_tokens (int): gist标记的数量。
 
         Returns:
-            GistActivations object containing the kv activations for the gist
-            tokens of the encoder, and the start position of the first gist
-            token (needed to correctly compute position embeddings).
+            GistActivations: 包含gist激活的对象。
+
         """
+        # 在编码器上执行前向传播，获取键值激活
         encoder_outputs = self.encoder(
             input_ids=input_ids,
             attention_mask=attention_mask,
             output_attentions=False,
             output_hidden_states=False,
-            use_cache=True,  # Needed to get key-value activations.
+            use_cache=True,  # 需要用到缓存以获取键值激活
         )
+        # 构建并返回GistActivations对象
         return GistActivations.from_model_outputs(
             model_outputs=encoder_outputs,
             input_ids=input_ids,
@@ -829,7 +845,33 @@ class GistT5ForConditionalGeneration(T5ForConditionalGeneration, GistGenerationM
         return_dict: Optional[bool] = None,
         gist_activations: Optional[GistActivations] = None,
     ) -> Union[Tuple[torch.FloatTensor], Seq2SeqLMOutput]:
-        r"""
+        """定义模型的前向传播逻辑。
+
+        Args:
+            input_ids (Optional[torch.LongTensor]): 输入ID张量。
+            attention_mask (Optional[torch.FloatTensor]): 注意力掩码张量。
+            decoder_input_ids (Optional[torch.LongTensor]): 解码器的输入ID张量。
+            decoder_attention_mask (Optional[torch.BoolTensor]): 解码器的注意力掩码张量。
+            cross_attention_mask (Optional[torch.BoolTensor]): 跨注意力掩码张量。
+            head_mask (Optional[torch.FloatTensor]): 头部掩码张量。
+            decoder_head_mask (Optional[torch.FloatTensor]): 解码器头部掩码张量。
+            cross_attn_head_mask (Optional[torch.Tensor]): 跨注意力头部掩码张量。
+            encoder_outputs (Optional[Tuple[Tuple[torch.Tensor]]]): 编码器输出。
+            past_key_values (Optional[Tuple[Tuple[torch.Tensor]]]): 过去的键值。
+            inputs_embeds (Optional[torch.FloatTensor]): 嵌入表示张量。
+            decoder_inputs_embeds (Optional[torch.FloatTensor]): 解码器的嵌入表示张量。
+            labels (Optional[torch.LongTensor]): 标签张量。
+            use_cache (Optional[bool]): 是否使用缓存。
+            output_attentions (Optional[bool]): 是否输出注意力权重。
+            output_hidden_states (Optional[bool]): 是否输出隐藏状态。
+            return_dict (Optional[bool]): 是否返回字典格式的输出。
+            gist_activations (Optional[GistActivations]): gist激活对象。
+
+        Returns:
+            Union[Tuple[torch.FloatTensor], Seq2SeqLMOutput]: 模型输出。
+
+        """
+                r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
             Labels for computing the sequence classification/regression loss.
             Indices should be in `[-100, 0, ..., config.vocab_size - 1]`. All
@@ -864,21 +906,20 @@ class GistT5ForConditionalGeneration(T5ForConditionalGeneration, GistGenerationM
         >>> print(tokenizer.decode(outputs[0], skip_special_tokens=True))
         >>> # studies have shown that owning a dog is good for you.
         ```"""
+        # 基于模型配置设置一些默认参数
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
 
-        # FutureWarning: head_mask was separated into two input args -
-        # head_mask, decoder_head_mask
+        # 若头部掩码不为空，则分配给解码器的头部掩码
         if head_mask is not None and decoder_head_mask is None:
             if self.config.num_layers == self.config.num_decoder_layers:
                 warnings.warn(__HEAD_MASK_WARNING_MSG, FutureWarning)
                 decoder_head_mask = head_mask
 
-        # Encode if needed (training, first prediction pass)
+        # 编码输入
         if encoder_outputs is None:
-            # Convert encoder inputs in embeddings if needed
             encoder_outputs = self.encoder(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -887,7 +928,7 @@ class GistT5ForConditionalGeneration(T5ForConditionalGeneration, GistGenerationM
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
-                gist_activations=gist_activations,
+                gist_activations=gist_activations,  # 添加gist激活
             )
         elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
             encoder_outputs = BaseModelOutput(
@@ -898,45 +939,7 @@ class GistT5ForConditionalGeneration(T5ForConditionalGeneration, GistGenerationM
 
         hidden_states = encoder_outputs[0]
 
-        if self.model_parallel:
-            torch.cuda.set_device(self.decoder.first_device)
-
-        if (
-            labels is not None
-            and decoder_input_ids is None
-            and decoder_inputs_embeds is None
-        ):
-            # get decoder inputs from shifting lm labels to the right
-            decoder_input_ids = self._shift_right(labels)
-
-        # Set device for model parallelism
-        if self.model_parallel:
-            torch.cuda.set_device(self.decoder.first_device)
-            hidden_states = hidden_states.to(self.decoder.first_device)
-            if decoder_input_ids is not None:
-                decoder_input_ids = decoder_input_ids.to(self.decoder.first_device)
-            if decoder_attention_mask is not None:
-                decoder_attention_mask = decoder_attention_mask.to(
-                    self.decoder.first_device
-                )
-            # If cross attention mask is supplied, then set the right mask.
-            # Otherwise reuse the attention mask.
-            if cross_attention_mask is None:
-                cross_attention_mask = attention_mask
-            cross_attention_mask = cross_attention_mask.to(self.decoder.first_device)
-
-        # Decode
-        # ==== BEGIN GIST CHANGES ====
-        # `attention_mask` right now is (batch_size, input_seq_len,
-        # input_seq_len) - it should be (batch_size, target_seq_len,
-        # input_seq_len), where every row of the cross attention mask is the
-        # gisted version (i.e. cannot attend to prior tokens).
-        # The problem is that it's somewhat difficult to extract the specific
-        # row(s) of `attention_mask` corresponding to the gisted condition since
-        # it's not clear what is padding and what is the gist-modified mask. So
-        # our model accepts an additional argument, `cross_attention_mask`,
-        # which should be (batch_size, target_seq_len, input_seq_len), which
-        # dictates how target seq tokens can attend back to input tokens.
+        # 解码器部分
         decoder_outputs = self.decoder(
             input_ids=decoder_input_ids,
             attention_mask=decoder_attention_mask,
@@ -951,33 +954,24 @@ class GistT5ForConditionalGeneration(T5ForConditionalGeneration, GistGenerationM
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-        # ==== END GIST CHANGES ====
 
         sequence_output = decoder_outputs[0]
 
-        # Set device for model parallelism
-        if self.model_parallel:
-            torch.cuda.set_device(self.encoder.first_device)
-            self.lm_head = self.lm_head.to(self.encoder.first_device)
-            sequence_output = sequence_output.to(self.lm_head.weight.device)
-
-        if self.config.tie_word_embeddings:
-            # Rescale output before projecting on vocab
-            # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586  # noqa
-            sequence_output = sequence_output * (self.model_dim**-0.5)
-
+        # 线性层，将模型的输出转换为词汇表中每个词的概率分布
         lm_logits = self.lm_head(sequence_output)
 
         loss = None
         if labels is not None:
+            # 计算损失
             loss_fct = CrossEntropyLoss(ignore_index=-100)
             loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))
-            # TODO(thom): Add z_loss https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/layers.py#L666  # noqa
 
         if not return_dict:
+            # 返回模型输出
             output = (lm_logits,) + decoder_outputs[1:] + encoder_outputs
             return ((loss,) + output) if loss is not None else output
 
+        # 返回字典格式的输出
         outputs = Seq2SeqLMOutput(
             loss=loss,
             logits=lm_logits,
@@ -1004,10 +998,29 @@ class GistT5ForConditionalGeneration(T5ForConditionalGeneration, GistGenerationM
         encoder_outputs=None,
         **kwargs,
     ):
-        # cut decoder_input_ids if past is used
+        """准备用于生成的模型输入。
+
+        Args:
+            input_ids: 输入ID张量。
+            past_key_values: 过去的键值。
+            attention_mask: 注意力掩码。
+            cross_attention_mask: 跨注意力掩码。
+            head_mask: 头部掩码。
+            decoder_head_mask: 解码器头部掩码。
+            cross_attn_head_mask: 跨注意力头部掩码。
+            use_cache: 是否使用缓存。
+            encoder_outputs: 编码器输出。
+            **kwargs: 其他关键字参数。
+
+        Returns:
+            dict: 包含各种输入参数的字典。
+
+        """
+        # 如果使用了过去的键值，则截取解码器的输入ID张量
         if past_key_values is not None:
             input_ids = input_ids[:, -1:]
 
+        # 构建并返回包含各种输入参数的字典
         inputs = {
             "decoder_input_ids": input_ids,
             "past_key_values": past_key_values,
